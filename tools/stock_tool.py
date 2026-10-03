@@ -2,14 +2,22 @@
 
 import logging
 import math
+import threading
+import time
 from typing import Any, Optional
 
 import pandas as pd
 import yfinance as yf
 
+from data.stock_master import INDIAN_STOCK_MASTER
 from utils.helpers import normalize_nse_symbol
 
 logger = logging.getLogger(__name__)
+
+# Fast in-memory thread-safe TTL price cache (avoids repeated network trips)
+_PRICE_CACHE: dict[str, tuple[float, dict]] = {}
+_PRICE_CACHE_LOCK = threading.Lock()
+_PRICE_CACHE_TTL = 90.0  # 90 seconds TTL
 
 
 def _clean_number(val: Any) -> Optional[float]:
@@ -103,6 +111,15 @@ def get_stock_price(symbol: str) -> dict:
         "currency": None,
     }
 
+    # Check in-memory cache first
+    now = time.time()
+    sym_upper = (symbol or "").upper().replace(".NS", "").replace("-EQ", "").strip()
+    with _PRICE_CACHE_LOCK:
+        if sym_upper in _PRICE_CACHE:
+            ts, cached_res = _PRICE_CACHE[sym_upper]
+            if now - ts < _PRICE_CACHE_TTL:
+                return cached_res.copy()
+
     # 1. Validate and normalize symbol
     try:
         from services.symbol_resolver import resolve_nse_symbol
@@ -119,8 +136,19 @@ def get_stock_price(symbol: str) -> dict:
         logger.warning("Symbol normalization failed for '%s': %s", symbol, exc)
         return result
 
+    # Check cache again under clean_symbol
+    with _PRICE_CACHE_LOCK:
+        if clean_symbol in _PRICE_CACHE:
+            ts, cached_res = _PRICE_CACHE[clean_symbol]
+            if now - ts < _PRICE_CACHE_TTL:
+                return cached_res.copy()
+
     result["symbol"] = clean_symbol
     result["yahoo_symbol"] = yahoo_symbol
+
+    # Instant company name from verified local master (0ms latency)
+    company = INDIAN_STOCK_MASTER.get(clean_symbol, {}).get("company_name")
+    result["company"] = company
 
     # 2. Instantiate Ticker safely
     try:
@@ -129,66 +157,24 @@ def get_stock_price(symbol: str) -> dict:
         logger.warning("Failed to initialize yfinance.Ticker for '%s': %s", yahoo_symbol, exc)
         return result
 
-    # 3. Retrieve fast_info safely
+    # 3. Retrieve fast_info (takes ~0.05s, lightweight)
     fast_info = None
     try:
         fast_info = ticker.fast_info
     except Exception as exc:
         logger.debug("fast_info unavailable for '%s': %s", yahoo_symbol, exc)
 
-    # 4. Retrieve info safely
-    info = None
-    try:
-        info_data = ticker.info
-        if isinstance(info_data, dict):
-            info = info_data
-    except Exception as exc:
-        logger.debug("info unavailable for '%s': %s", yahoo_symbol, exc)
-
-    # 4b. Fallback to migrated ticker if primary ticker has no quote (e.g. corporate restructuring)
-    YAHOO_MIGRATED_TICKERS = {"TATAMOTORS.NS": "TMCV.NS"}
-    if yahoo_symbol in YAHOO_MIGRATED_TICKERS:
-        has_valid_data = False
-        if fast_info:
-            try:
-                has_valid_data = fast_info.last_price is not None
-            except Exception:
-                pass
-        if not has_valid_data and isinstance(info, dict):
-            has_valid_data = bool(info.get("shortName") or info.get("longName") or info.get("currentPrice"))
-
-        if not has_valid_data:
-            migrated_sym = YAHOO_MIGRATED_TICKERS[yahoo_symbol]
-            try:
-                m_ticker = yf.Ticker(migrated_sym)
-                m_fast = getattr(m_ticker, "fast_info", None)
-                m_info = getattr(m_ticker, "info", None)
-                ticker = m_ticker
-                fast_info = m_fast
-                info = m_info if isinstance(m_info, dict) else None
-            except Exception:
-                pass
-
-    # Extract company name (primarily from info)
-    company = None
-    if info:
-        company = _clean_str(info.get("longName") or info.get("shortName"))
-    result["company"] = company
-
-    # Extract current price: fast_info -> info fallback
+    # 4. Extract metrics from fast_info
     current_price = None
+    previous_close = None
+    high_52 = None
+    low_52 = None
+    currency = "INR"
+
     if fast_info:
         current_price = _clean_number(
             _safe_get_property(fast_info, "last_price", "lastPrice", "regular_market_price")
         )
-    if current_price is None and info:
-        current_price = _clean_number(
-            info.get("currentPrice") or info.get("regularMarketPrice")
-        )
-
-    # Extract previous close: fast_info -> info fallback
-    previous_close = None
-    if fast_info:
         previous_close = _clean_number(
             _safe_get_property(
                 fast_info,
@@ -197,15 +183,6 @@ def get_stock_price(symbol: str) -> dict:
                 "regular_market_previous_close",
             )
         )
-    if previous_close is None and info:
-        previous_close = _clean_number(
-            info.get("previousClose") or info.get("regularMarketPreviousClose")
-        )
-
-    # Extract 52-week high & low: fast_info -> info fallback
-    high_52 = None
-    low_52 = None
-    if fast_info:
         high_52 = _clean_number(
             _safe_get_property(
                 fast_info,
@@ -224,19 +201,31 @@ def get_stock_price(symbol: str) -> dict:
                 "fiftyTwoWeekLow",
             )
         )
-    if high_52 is None and info:
-        high_52 = _clean_number(info.get("fiftyTwoWeekHigh"))
-    if low_52 is None and info:
-        low_52 = _clean_number(info.get("fiftyTwoWeekLow"))
+        currency = _clean_str(_safe_get_property(fast_info, "currency")) or "INR"
 
-    # Extract currency: fast_info -> info fallback
-    currency = None
-    if fast_info:
-        currency = _clean_str(_safe_get_property(fast_info, "currency"))
-    if currency is None and info:
-        currency = _clean_str(info.get("currency"))
+    # 5. Slow fallback ONLY if fast_info yielded no price
+    if current_price is None:
+        info = None
+        try:
+            info_data = ticker.info
+            if isinstance(info_data, dict):
+                info = info_data
+        except Exception:
+            pass
 
-    # 5. History fallback if prices are still missing
+        if info:
+            if not company:
+                company = _clean_str(info.get("longName") or info.get("shortName"))
+                result["company"] = company
+            current_price = _clean_number(info.get("currentPrice") or info.get("regularMarketPrice"))
+            if previous_close is None:
+                previous_close = _clean_number(info.get("previousClose") or info.get("regularMarketPreviousClose"))
+            if high_52 is None:
+                high_52 = _clean_number(info.get("fiftyTwoWeekHigh"))
+            if low_52 is None:
+                low_52 = _clean_number(info.get("fiftyTwoWeekLow"))
+
+    # 6. History fallback if prices are still missing
     if current_price is None or previous_close is None:
         try:
             hist = ticker.history(period="5d")
@@ -250,13 +239,14 @@ def get_stock_price(symbol: str) -> dict:
             logger.debug("history fallback failed for '%s': %s", yahoo_symbol, exc)
 
     # Assign resolved fields
+    result["company"] = company or clean_symbol
     result["current_price"] = current_price
     result["previous_close"] = previous_close
     result["52_week_high"] = high_52
     result["52_week_low"] = low_52
     result["currency"] = currency
 
-    # 6. Calculate change and change_percent only when both prices exist
+    # 7. Calculate change and change_percent
     if current_price is not None and previous_close is not None:
         change = round(current_price - previous_close, 2)
         result["change"] = change
@@ -267,5 +257,11 @@ def get_stock_price(symbol: str) -> dict:
     else:
         result["change"] = None
         result["change_percent"] = None
+
+    # Store in memory cache
+    with _PRICE_CACHE_LOCK:
+        _PRICE_CACHE[clean_symbol] = (time.time(), result.copy())
+        if sym_upper != clean_symbol:
+            _PRICE_CACHE[sym_upper] = (time.time(), result.copy())
 
     return result

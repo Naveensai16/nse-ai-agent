@@ -366,12 +366,18 @@ def classify_query(
         if cache_key in _classification_cache:
             return _classification_cache[cache_key]
 
-    # If LLM disabled, jump directly to high-precision deterministic classification
-    if not use_llm:
-        sc = _classify_deterministically(clean_query, resolved_symbols, context)
+    # Fast-path: Check high-confidence deterministic match first (0.0001s latency)
+    det_sc = _classify_deterministically(clean_query, resolved_symbols, context)
+    if det_sc.intent != MarketIntent.FALLBACK.value and not det_sc.needs_clarification:
         with _cache_lock:
-            _classification_cache[cache_key] = sc
-        return sc
+            _classification_cache[cache_key] = det_sc
+        return det_sc
+
+    # If LLM disabled, return deterministic classification directly
+    if not use_llm:
+        with _cache_lock:
+            _classification_cache[cache_key] = det_sc
+        return det_sc
 
     # Check health and rate limit
     health = check_ollama_health()
@@ -582,12 +588,16 @@ def synthesize_grounded_response(
 
     If Ollama is not configured, unreachable, or fails, returns the deterministic markdown directly.
     """
+    # If the markdown output is already a complete structured report, return immediately (0ms latency)
+    if deterministic_markdown.startswith("###") or "|" in deterministic_markdown:
+        return deterministic_markdown
+
     health = check_ollama_health()
     if not (health["reachable"] and health["model_available"]) or not rate_limiter.is_allowed(session_id):
         return deterministic_markdown
 
     try:
-        trimmed_summary = grounded_data_summary[:800]
+        trimmed_summary = grounded_data_summary[:500]
         user_content = (
             f"User Question: {query}\n\n"
             f"Verified Market Data:\n{trimmed_summary}\n\n"
@@ -603,17 +613,13 @@ def synthesize_grounded_response(
             messages=messages,
             model=OLLAMA_MODEL,
             temperature=0.1,
-            max_tokens=150,
+            max_tokens=60,
             format_json=False,
-            timeout=OLLAMA_TIMEOUT_SECONDS,
+            timeout=5.0,
         )
 
-        if synthesized and len(synthesized.strip()) > 25:
-            cleaned_synth = synthesized.strip()
-            # If deterministic markdown has structured tables or cards, combine them
-            if "|" in deterministic_markdown or "###" in deterministic_markdown:
-                return f"{cleaned_synth}\n\n---\n\n{deterministic_markdown}"
-            return cleaned_synth
+        if synthesized and len(synthesized.strip()) > 15:
+            return synthesized.strip()
 
     except Exception as exc:
         logger.warning("Ollama grounded synthesis failed: %s. Using deterministic output.", exc)

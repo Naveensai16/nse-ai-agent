@@ -400,13 +400,16 @@ NIFTY_CORE_SYMBOLS = (
     "HCLTECH",
     "MARUTI",
     "SUNPHARMA",
-    "TATAMOTORS",
+    "WIPRO",
     "KOTAKBANK",
     "TITAN",
     "ONGC",
     "NTPC",
     "AXISBANK",
 )
+
+# In-memory movers cache
+_MOVERS_CACHE: dict[str, tuple[float, tuple[list[dict[str, Any]], list[dict[str, Any]]]]] = {}
 
 
 class GainersLosersProvider:
@@ -421,20 +424,28 @@ class GainersLosersProvider:
     def fetch_market_movers(
         self, limit: int = 5
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Fetch quotes across constituent universe and rank top gainers and losers.
+        """Fetch quotes across constituent universe concurrently and rank top gainers and losers.
 
         Returns:
             Tuple of (gainers_list, losers_list).
         """
-        movers: list[dict[str, Any]] = []
+        import concurrent.futures
+        import time
 
-        for symbol in self.symbols:
+        cache_key = f"movers_{limit}"
+        now = time.time()
+        if cache_key in _MOVERS_CACHE:
+            ts, cached_data = _MOVERS_CACHE[cache_key]
+            if now - ts < 120.0:  # 2 minute cache
+                return cached_data
+
+        def _fetch_single_mover(symbol: str) -> Optional[dict[str, Any]]:
             try:
                 yahoo_symbol = f"{symbol}.NS"
                 ticker = yf.Ticker(yahoo_symbol)
                 fast_info = getattr(ticker, "fast_info", None)
                 if not fast_info:
-                    continue
+                    return None
 
                 price = _clean_number(
                     _safe_get_property(
@@ -453,21 +464,25 @@ class GainersLosersProvider:
                 if price is not None and prev_close is not None and prev_close > 0:
                     change = round(price - prev_close, 2)
                     change_percent = round((change / prev_close) * 100, 2)
-                    movers.append(
-                        {
-                            "symbol": symbol,
-                            "yahoo_symbol": yahoo_symbol,
-                            "price": price,
-                            "previous_close": prev_close,
-                            "change": change,
-                            "change_percent": change_percent,
-                        }
-                    )
+                    return {
+                        "symbol": symbol,
+                        "yahoo_symbol": yahoo_symbol,
+                        "price": price,
+                        "previous_close": prev_close,
+                        "change": change,
+                        "change_percent": change_percent,
+                    }
             except Exception as exc:
-                logger.debug(
-                    "Failed to fetch quote for '%s' in mover scan: %s", symbol, exc
-                )
-                continue
+                logger.debug("Failed to fetch quote for '%s' in mover scan: %s", symbol, exc)
+            return None
+
+        movers: list[dict[str, Any]] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_sym = {executor.submit(_fetch_single_mover, sym): sym for sym in self.symbols}
+            for fut in concurrent.futures.as_completed(future_to_sym):
+                res = fut.result()
+                if res:
+                    movers.append(res)
 
         if not movers:
             return [], []
@@ -485,7 +500,9 @@ class GainersLosersProvider:
             key=lambda x: x["change_percent"],
         )
 
-        return gainers[:limit], losers[:limit]
+        result = (gainers[:limit], losers[:limit])
+        _MOVERS_CACHE[cache_key] = (now, result)
+        return result
 
 
 _DEFAULT_MOVER_PROVIDER = GainersLosersProvider()

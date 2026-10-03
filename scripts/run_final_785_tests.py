@@ -398,6 +398,9 @@ def run_full_suite() -> str:
         patch("agent.demo_agent.get_company_info", side_effect=get_mock_company_info),
         patch("agent.demo_agent.get_market_news", side_effect=get_mock_news),
         patch("agent.demo_agent.get_stock_sentiment", return_value=mock_sentiment),
+        patch("services.market_assistant_service.get_verified_stock_catalysts", return_value=["Strong technical momentum near 52W high."]),
+        patch("services.catalyst_service.get_market_news", side_effect=get_mock_news),
+        patch("services.catalyst_service.get_verified_stock_catalysts", return_value=["Strong technical momentum near 52W high."]),
     ]
 
     with ExitStack() as stack:

@@ -65,29 +65,42 @@ def extract_symbols(query: str) -> list[str]:
 # ==============================================================================
 
 
+# In-memory screening caches (120s TTL)
+_52W_HIGH_CACHE: dict[str, tuple[float, tuple[str, list[dict[str, Any]]]]] = {}
+_52W_LOW_CACHE: dict[str, tuple[float, tuple[str, list[dict[str, Any]]]]] = {}
+
+
 def handle_52_week_high_stocks(
     query: str,
     params: dict[str, Any],
 ) -> tuple[str, list[dict[str, Any]]]:
     """Screen liquid NSE universe for stocks trading at or near their 52-week high."""
-    tool_calls: list[dict[str, Any]] = []
-    include_catalysts = params.get("include_catalysts", True)
+    import concurrent.futures
+    import time
 
+    include_catalysts = params.get("include_catalysts", True)
+    cache_key = f"high_{include_catalysts}"
+    now = time.time()
+    if cache_key in _52W_HIGH_CACHE:
+        ts, cached = _52W_HIGH_CACHE[cache_key]
+        if now - ts < 120.0:
+            return cached
+
+    tool_calls: list[dict[str, Any]] = []
     candidates: list[dict[str, Any]] = []
-    scan_universe = list(NIFTY_CORE_SYMBOLS) + ["TATAPOWER", "BEL", "HAL", "ZOMATO", "TRENT"]
+    scan_universe = list(NIFTY_CORE_SYMBOLS) + ["TATAPOWER", "BEL", "HAL", "TRENT", "COALINDIA"]
 
     tool_calls.append({"name": "scan_52_week_highs", "args": {"universe_size": len(scan_universe)}})
 
-    for sym in scan_universe:
+    def _eval_stock_high(sym: str) -> Optional[dict[str, Any]]:
         try:
             p = get_stock_price(sym)
             curr = p.get("current_price")
             h52 = p.get("52_week_high")
             if curr and h52 and h52 > 0:
                 dist_pct = round(((curr - h52) / h52) * 100.0, 2)
-                # Select stocks within 5.0% of 52-week high
                 if dist_pct >= -5.0:
-                    candidates.append({
+                    return {
                         "symbol": sym,
                         "company": p.get("company") or INDIAN_STOCK_MASTER.get(sym, {}).get("company_name", sym),
                         "price": curr,
@@ -96,15 +109,21 @@ def handle_52_week_high_stocks(
                         "change_pct": p.get("change_percent", 0.0),
                         "price_data": p,
                         "sector": SECTOR_MAP.get(sym, "Diversified"),
-                    })
+                    }
         except Exception:
-            continue
+            pass
+        return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(_eval_stock_high, s): s for s in scan_universe}
+        for fut in concurrent.futures.as_completed(futures):
+            res = fut.result()
+            if res:
+                candidates.append(res)
 
     if not candidates:
-        # Fallback: take stocks with least negative distance to high
         candidates = sorted(candidates, key=lambda x: x["dist_pct"], reverse=True)
     else:
-        # Rank by closest distance to high (0.0% or positive breakout first)
         candidates = sorted(candidates, key=lambda x: x["dist_pct"], reverse=True)
 
     top_stocks = candidates[:5]
@@ -113,6 +132,23 @@ def handle_52_week_high_stocks(
         "### 📈 NSE Stocks Near Their 52-Week High\n",
         "The following liquid NSE equities are currently trading within touching distance of their 52-week highs:\n",
     ]
+
+    # Pre-fetch catalysts in parallel for the top 5 stocks
+    catalysts_map: dict[str, Any] = {}
+    if include_catalysts and top_stocks:
+        def _get_cat(stock_entry: dict[str, Any]):
+            sym = stock_entry["symbol"]
+            try:
+                return sym, get_verified_stock_catalysts(sym, price_data=stock_entry["price_data"])
+            except Exception:
+                return sym, None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as cat_exec:
+            cat_futs = {cat_exec.submit(_get_cat, s): s["symbol"] for s in top_stocks}
+            for cf in concurrent.futures.as_completed(cat_futs):
+                s_sym, cat_val = cf.result()
+                if cat_val:
+                    catalysts_map[s_sym] = cat_val
 
     for idx, c in enumerate(top_stocks, start=1):
         sym = c["symbol"]
@@ -131,13 +167,15 @@ def handle_52_week_high_stocks(
 
         if include_catalysts:
             tool_calls.append({"name": "get_verified_stock_catalysts", "args": {"symbol": sym}})
-            catalysts = get_verified_stock_catalysts(sym, price_data=c["price_data"])
+            catalysts = catalysts_map.get(sym) or get_verified_stock_catalysts(sym, price_data=c["price_data"])
             lines.append("\n**Why it may be moving:**")
             lines.append(format_catalyst_section(catalysts))
 
         lines.append("\n---")
 
-    return "\n".join(lines), tool_calls
+    result = ("\n".join(lines), tool_calls)
+    _52W_HIGH_CACHE[cache_key] = (now, result)
+    return result
 
 
 def handle_52_week_low_stocks(
@@ -145,13 +183,23 @@ def handle_52_week_low_stocks(
     params: dict[str, Any],
 ) -> tuple[str, list[dict[str, Any]]]:
     """Screen liquid NSE universe for stocks trading at or near their 52-week low."""
+    import concurrent.futures
+    import time
+
+    cache_key = "low_default"
+    now = time.time()
+    if cache_key in _52W_LOW_CACHE:
+        ts, cached = _52W_LOW_CACHE[cache_key]
+        if now - ts < 120.0:
+            return cached
+
     tool_calls: list[dict[str, Any]] = []
     candidates: list[dict[str, Any]] = []
     scan_universe = list(NIFTY_CORE_SYMBOLS) + ["TATAPOWER", "WIPRO", "HCLTECH"]
 
     tool_calls.append({"name": "scan_52_week_lows", "args": {"universe_size": len(scan_universe)}})
 
-    for sym in scan_universe:
+    def _eval_stock_low(sym: str) -> Optional[dict[str, Any]]:
         try:
             p = get_stock_price(sym)
             curr = p.get("current_price")
@@ -159,7 +207,7 @@ def handle_52_week_low_stocks(
             if curr and l52 and l52 > 0:
                 dist_pct = round(((curr - l52) / l52) * 100.0, 2)
                 if dist_pct <= 8.0:
-                    candidates.append({
+                    return {
                         "symbol": sym,
                         "company": p.get("company") or INDIAN_STOCK_MASTER.get(sym, {}).get("company_name", sym),
                         "price": curr,
@@ -167,9 +215,17 @@ def handle_52_week_low_stocks(
                         "dist_pct": dist_pct,
                         "change_pct": p.get("change_percent", 0.0),
                         "sector": SECTOR_MAP.get(sym, "Diversified"),
-                    })
+                    }
         except Exception:
-            continue
+            pass
+        return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(_eval_stock_low, s): s for s in scan_universe}
+        for fut in concurrent.futures.as_completed(futures):
+            res = fut.result()
+            if res:
+                candidates.append(res)
 
     candidates = sorted(candidates, key=lambda x: x["dist_pct"])[:5]
 
