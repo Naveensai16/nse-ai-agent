@@ -168,6 +168,7 @@ class StructuredClassification:
     clarification_group: Optional[str] = None
     confidence: float = 1.0
     source: str = "ollama"  # 'ollama' or 'deterministic'
+    extra_params: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -325,6 +326,7 @@ def _classify_deterministically(
         needs_clarification=has_conglomerate,
         clarification_group=ambig_group,
         source="deterministic",
+        extra_params=det_params,
     )
 
 
@@ -561,6 +563,7 @@ def classify_query(
         needs_clarification=has_conglomerate,
         clarification_group=ambig_group,
         source="deterministic",
+        extra_params=det_params,
     )
     with _cache_lock:
         _classification_cache[cache_key] = sc

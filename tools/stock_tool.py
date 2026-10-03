@@ -104,6 +104,9 @@ def get_stock_price(symbol: str) -> dict:
         "company": None,
         "current_price": None,
         "previous_close": None,
+        "open": None,
+        "day_high": None,
+        "day_low": None,
         "change": None,
         "change_percent": None,
         "52_week_high": None,
@@ -144,6 +147,8 @@ def get_stock_price(symbol: str) -> dict:
                 return cached_res.copy()
 
     result["symbol"] = clean_symbol
+    if clean_symbol == "TATAMOTORS":
+        yahoo_symbol = "TMPV.NS"
     result["yahoo_symbol"] = yahoo_symbol
 
     # Instant company name from verified local master (0ms latency)
@@ -167,6 +172,9 @@ def get_stock_price(symbol: str) -> dict:
     # 4. Extract metrics from fast_info
     current_price = None
     previous_close = None
+    open_price = None
+    day_high = None
+    day_low = None
     high_52 = None
     low_52 = None
     currency = "INR"
@@ -183,6 +191,9 @@ def get_stock_price(symbol: str) -> dict:
                 "regular_market_previous_close",
             )
         )
+        open_price = _clean_number(_safe_get_property(fast_info, "open", "regular_market_open"))
+        day_high = _clean_number(_safe_get_property(fast_info, "day_high", "dayHigh", "regular_market_day_high"))
+        day_low = _clean_number(_safe_get_property(fast_info, "day_low", "dayLow", "regular_market_day_low"))
         high_52 = _clean_number(
             _safe_get_property(
                 fast_info,
@@ -220,6 +231,12 @@ def get_stock_price(symbol: str) -> dict:
             current_price = _clean_number(info.get("currentPrice") or info.get("regularMarketPrice"))
             if previous_close is None:
                 previous_close = _clean_number(info.get("previousClose") or info.get("regularMarketPreviousClose"))
+            if open_price is None:
+                open_price = _clean_number(info.get("open") or info.get("regularMarketOpen"))
+            if day_high is None:
+                day_high = _clean_number(info.get("dayHigh") or info.get("regularMarketDayHigh"))
+            if day_low is None:
+                day_low = _clean_number(info.get("dayLow") or info.get("regularMarketDayLow"))
             if high_52 is None:
                 high_52 = _clean_number(info.get("fiftyTwoWeekHigh"))
             if low_52 is None:
@@ -235,6 +252,12 @@ def get_stock_price(symbol: str) -> dict:
                     current_price = _clean_number(valid_closes.iloc[-1])
                 if len(valid_closes) >= 2 and previous_close is None:
                     previous_close = _clean_number(valid_closes.iloc[-2])
+                if "Open" in hist.columns and open_price is None:
+                    open_price = _clean_number(hist["Open"].dropna().iloc[-1])
+                if "High" in hist.columns and day_high is None:
+                    day_high = _clean_number(hist["High"].dropna().iloc[-1])
+                if "Low" in hist.columns and day_low is None:
+                    day_low = _clean_number(hist["Low"].dropna().iloc[-1])
         except Exception as exc:
             logger.debug("history fallback failed for '%s': %s", yahoo_symbol, exc)
 
@@ -242,6 +265,9 @@ def get_stock_price(symbol: str) -> dict:
     result["company"] = company or clean_symbol
     result["current_price"] = current_price
     result["previous_close"] = previous_close
+    result["open"] = open_price or previous_close or current_price
+    result["day_high"] = day_high or current_price
+    result["day_low"] = day_low or current_price
     result["52_week_high"] = high_52
     result["52_week_low"] = low_52
     result["currency"] = currency

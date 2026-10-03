@@ -266,6 +266,16 @@ def extract_symbols_from_query(query: str) -> list[str]:
     if len(words_full) == 1 and (words_full[0] in CONGLOMERATE_GROUPS or words_full[0] in GENERIC_FINANCIAL_WORDS):
         return []
 
+    # Identify explicit negative exclusions (e.g. "not ITC", "excluding TCS", "except RELIANCE")
+    excluded_symbols: set[str] = set()
+    for ex_match in re.finditer(r"\b(?:not|excluding|except)\s+([a-zA-Z0-9&]+(?:\s+[a-zA-Z0-9&]+)?)", query, flags=re.IGNORECASE):
+        candidate_ex = ex_match.group(1).strip().upper()
+        res_ex = resolve_nse_symbol(candidate_ex, allow_online_lookup=False)
+        if res_ex.get("symbol"):
+            excluded_symbols.add(res_ex["symbol"])
+        elif candidate_ex in STOCK_ALIASES:
+            excluded_symbols.add(STOCK_ALIASES[candidate_ex])
+
     # 1. Multi-word phrase scan first (longest multi-word aliases first, e.g. 'TATA MOTORS', 'STATE BANK OF INDIA', 'YES BANK')
     matched_spans: list[tuple[int, int]] = []
     for alias, ticker in sorted(STOCK_ALIASES.items(), key=lambda x: len(x[0]), reverse=True):
@@ -276,7 +286,7 @@ def extract_symbols_from_query(query: str) -> list[str]:
             if any(max(m.start(), s[0]) < min(m.end(), s[1]) for s in matched_spans):
                 continue
             matched_spans.append((m.start(), m.end()))
-            if ticker not in found:
+            if ticker not in found and ticker not in excluded_symbols:
                 found.append(ticker)
 
     for g_alias in sorted(GLOBAL_STOCKS.keys(), key=len, reverse=True):
@@ -285,11 +295,11 @@ def extract_symbols_from_query(query: str) -> list[str]:
             if any(max(m.start(), s[0]) < min(m.end(), s[1]) for s in matched_spans):
                 continue
             matched_spans.append((m.start(), m.end()))
-            if g_alias not in found:
+            if g_alias not in found and g_alias not in excluded_symbols:
                 found.append(g_alias)
 
-    # 2. Segment-based parser (handles comma-separated lists, 'and'/'vs' joined, or carrier phrases)
-    segments = re.split(r'[,;\n/]|(?:\s+(?:and|vs|versus|with|against|compared to|side by side with)\s+)', query, flags=re.IGNORECASE)
+    # 2. Segment-based parser (handles comma-separated lists, 'and'/'or'/'vs' joined, em-dashes, or carrier phrases)
+    segments = re.split(r'[,;\n/—–\-]|(?:\s+(?:and|or|vs|versus|with|against|compared to|side by side with|between)\s+)', query, flags=re.IGNORECASE)
     all_known_keys = [
         k for k in (list(STOCK_ALIASES.keys()) + list(GLOBAL_STOCKS.keys()))
         if k.lower() not in GENERIC_FINANCIAL_WORDS and k.lower() not in CONGLOMERATE_GROUPS
@@ -311,12 +321,12 @@ def extract_symbols_from_query(query: str) -> list[str]:
         # Check exact alias match
         if phrase_upper in STOCK_ALIASES:
             sym = STOCK_ALIASES[phrase_upper]
-            if sym not in found:
+            if sym not in found and sym not in excluded_symbols:
                 found.append(sym)
             continue
 
         if phrase_upper in GLOBAL_STOCKS:
-            if phrase_upper not in found:
+            if phrase_upper not in found and phrase_upper not in excluded_symbols:
                 found.append(phrase_upper)
             continue
 
@@ -324,7 +334,7 @@ def extract_symbols_from_query(query: str) -> list[str]:
         res = resolve_nse_symbol(phrase, allow_online_lookup=False)
         if res.get("symbol") and res.get("confidence", 0.0) >= 0.75 and not res.get("is_ambiguous"):
             sym = res["symbol"]
-            if sym not in found:
+            if sym not in found and sym not in excluded_symbols:
                 found.append(sym)
             continue
 
@@ -334,7 +344,7 @@ def extract_symbols_from_query(query: str) -> list[str]:
             if close:
                 match_key = close[0]
                 sym = STOCK_ALIASES.get(match_key, match_key)
-                if sym not in found:
+                if sym not in found and sym not in excluded_symbols:
                     found.append(sym)
                 continue
 
@@ -349,16 +359,16 @@ def extract_symbols_from_query(query: str) -> list[str]:
 
             if w_up in STOCK_ALIASES:
                 sym = STOCK_ALIASES[w_up]
-                if sym not in found:
+                if sym not in found and sym not in excluded_symbols:
                     found.append(sym)
             elif w_up in GLOBAL_STOCKS:
-                if w_up not in found:
+                if w_up not in found and w_up not in excluded_symbols:
                     found.append(w_up)
             else:
                 res_w = resolve_nse_symbol(w, allow_online_lookup=False)
                 if res_w.get("symbol") and res_w.get("confidence", 0.0) >= 0.8 and not res_w.get("is_ambiguous"):
                     sym = res_w["symbol"]
-                    if sym not in found:
+                    if sym not in found and sym not in excluded_symbols:
                         found.append(sym)
                 else:
                     if len(w_up) >= 4:

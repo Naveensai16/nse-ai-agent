@@ -334,6 +334,20 @@ def run_full_suite() -> str:
 
     mock_sentiment = {"sentiment": "Bullish", "score": 75.0, "rsi": 62.5, "signals": ["RSI above 60", "Trading above 50-DMA"]}
     mock_index = {"symbol": "^NSEI", "name": "NIFTY 50", "current_price": 25250.0, "change": 140.0, "change_percent": 0.56, "previous_close": 25110.0, "open": 25150.0, "high": 25300.0, "low": 25100.0, "52_week_high": 26277.35, "52_week_low": 18837.85}
+    mock_gainers = [
+        {"symbol": "TATAPOWER", "company": "Tata Power Company Limited", "price": 425.0, "change_percent": 3.85, "previous_close": 409.25},
+        {"symbol": "INFY", "company": "Infosys Limited", "price": 1600.0, "change_percent": 2.50, "previous_close": 1561.0},
+        {"symbol": "RELIANCE", "company": "Reliance Industries Limited", "price": 2800.0, "change_percent": 1.95, "previous_close": 2746.5},
+        {"symbol": "TCS", "company": "Tata Consultancy Services Limited", "price": 3500.0, "change_percent": 1.70, "previous_close": 3441.5},
+        {"symbol": "SBIN", "company": "State Bank of India", "price": 780.0, "change_percent": 1.25, "previous_close": 770.35},
+    ]
+    mock_losers = [
+        {"symbol": "HDFCBANK", "company": "HDFC Bank Limited", "price": 1650.0, "change_percent": -2.45, "previous_close": 1691.5},
+        {"symbol": "ICICIBANK", "company": "ICICI Bank Limited", "price": 1220.0, "change_percent": -1.85, "previous_close": 1243.0},
+        {"symbol": "TATASTEEL", "company": "Tata Steel Limited", "price": 155.0, "change_percent": -1.50, "previous_close": 157.35},
+        {"symbol": "ITC", "company": "ITC Limited", "price": 490.0, "change_percent": -1.15, "previous_close": 495.7},
+        {"symbol": "YESBANK", "company": "Yes Bank Limited", "price": 24.5, "change_percent": -0.85, "previous_close": 24.7},
+    ]
 
     class MockFastInfo:
         def __init__(self, p):
@@ -385,6 +399,8 @@ def run_full_suite() -> str:
         patch("services.market_assistant_service.get_market_news", side_effect=get_mock_news),
         patch("services.market_assistant_service.get_stock_sentiment", return_value=mock_sentiment),
         patch("services.market_assistant_service.get_market_index", return_value=mock_index),
+        patch("services.market_assistant_service.get_top_gainers", return_value=mock_gainers),
+        patch("services.market_assistant_service.get_top_losers", return_value=mock_losers),
         patch("services.market_assistant_service.evaluate_pe_valuation", return_value={"assessment": "Fair", "reason": "Trading at fair historical valuation multiples.", "sector_median": 22.0}),
         patch("services.market_assistant_service.get_quarterly_financials", return_value=[{"period": "Q1 2026", "revenue": "₹25,000 Cr", "net_profit": "₹4,200 Cr"}]),
         patch("services.market_assistant_service.get_corporate_actions", return_value=[{"type": "Dividend", "date": "2026-09-15", "description": "Interim Dividend ₹12/share"}]),
@@ -393,6 +409,8 @@ def run_full_suite() -> str:
         patch("tools.news_tool.get_market_news", side_effect=get_mock_news),
         patch("tools.sentiment_tool.get_stock_sentiment", return_value=mock_sentiment),
         patch("tools.market_tool.get_market_index", return_value=mock_index),
+        patch("tools.market_tool.get_top_gainers", return_value=mock_gainers),
+        patch("tools.market_tool.get_top_losers", return_value=mock_losers),
         patch("tools.opportunity_tool.get_short_term_opportunities", return_value={"report_markdown": "### 📈 Short-Term Trading Opportunities\n\nTop setups identified across liquid NSE equities.", "opportunities": []}),
         patch("agent.demo_agent.get_stock_price", side_effect=get_mock_price),
         patch("agent.demo_agent.get_company_info", side_effect=get_mock_company_info),
@@ -534,7 +552,7 @@ def run_full_suite() -> str:
             if idx % 100 == 0 or idx == total_rows:
                 passed_so_far = sum(1 for r in results if r["status"] == "PASSED")
                 failed_so_far = sum(1 for r in results if r["status"] == "FAILED")
-                print(f"[{idx:3d}/{total_rows}] Executed... PASSED: {passed_so_far:3d} | FAILED: {failed_so_far:3d}")
+                print(f"[{idx:3d}/{total_rows}] Executed... PASSED: {passed_so_far:3d} | FAILED: {failed_so_far:3d}", flush=True)
 
     duration = time.time() - start_time
     total_executed = len(results)
@@ -543,10 +561,10 @@ def run_full_suite() -> str:
     not_run_count = 0  # Strictly 0
     pass_rate = round((passed_count / total_executed) * 100.0, 2) if total_executed else 0.0
 
-    print("\n" + "=" * 80)
-    print("ALL 785 NATURAL LANGUAGE TESTS COMPLETED")
-    print(f"TOTAL: {total_executed} | PASSED: {passed_count} | FAILED: {failed_count} | NOT RUN: {not_run_count} | PASS RATE: {pass_rate}%")
-    print("=" * 80)
+    print("\n" + "=" * 80, flush=True)
+    print("ALL 785 NATURAL LANGUAGE TESTS COMPLETED", flush=True)
+    print(f"TOTAL: {total_executed} | PASSED: {passed_count} | FAILED: {failed_count} | NOT RUN: {not_run_count} | PASS RATE: {pass_rate}%", flush=True)
+    print("=" * 80, flush=True)
 
     # Clean up temp db
     try:
@@ -565,7 +583,7 @@ def run_full_suite() -> str:
         server_checks.append(("Local Streamlit Health (http://localhost:8501)", "FAILED", str(e)))
 
     # 2. Public tunnel check
-    tunnel_url = "https://proteins-anchor-bailey-unlimited.trycloudflare.com"
+    tunnel_url = "https://efficiently-messages-penalty-emily.trycloudflare.com"
     try:
         req = urllib.request.urlopen(f"{tunnel_url}/_stcore/health", timeout=8)
         server_checks.append((f"Public Tunnel Health ({tunnel_url})", "PASSED", f"Status code {req.getcode()} (Reachable)"))
