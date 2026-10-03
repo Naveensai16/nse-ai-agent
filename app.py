@@ -35,12 +35,18 @@ from utils.ui_helpers import (
     format_error_message,
     format_tool_call_summary,
 )
+from services.symbol_resolver import (
+    INDIAN_STOCK_MASTER,
+    resolve_nse_symbol,
+    search_stocks,
+)
 from ui.components import (
     render_compliance_notice,
     render_decision_card,
     render_metric_card,
     render_positive_negative_cards,
     render_stock_header,
+    stock_autocomplete,
 )
 from ui.header import render_top_header
 from ui.theme import get_global_css
@@ -53,10 +59,6 @@ def init_session_state() -> None:
     """Initialize Streamlit session state variables for chat tracking and view routing."""
     if "current_conversation_id" not in st.session_state:
         st.session_state["current_conversation_id"] = None
-    if "openai_api_key" not in st.session_state:
-        st.session_state["openai_api_key"] = os.getenv("OPENAI_API_KEY", "")
-    if "demo_mode" not in st.session_state:
-        st.session_state["demo_mode"] = not bool(st.session_state["openai_api_key"])
     if "view_mode" not in st.session_state:
         st.session_state["view_mode"] = "chat"
     if "opp_cache_token" not in st.session_state:
@@ -81,6 +83,25 @@ def init_session_state() -> None:
         st.session_state["decision_quantity"] = 0
     if "decision_cache_token" not in st.session_state:
         st.session_state["decision_cache_token"] = 0
+    # Search and Decision Assistant lifecycle states
+    if "decision_pending_input" not in st.session_state:
+        st.session_state["decision_pending_input"] = None
+    if "decision_selected_stock" not in st.session_state:
+        st.session_state["decision_selected_stock"] = None
+    if "decision_selected_symbol" not in st.session_state:
+        st.session_state["decision_selected_symbol"] = None
+    if "stock_search_text" not in st.session_state:
+        st.session_state["stock_search_text"] = ""
+    if "stock_suggestions" not in st.session_state:
+        st.session_state["stock_suggestions"] = []
+    if "selected_stock_name" not in st.session_state:
+        st.session_state["selected_stock_name"] = None
+    if "selected_symbol" not in st.session_state:
+        st.session_state["selected_symbol"] = None
+    if "analysis_result" not in st.session_state:
+        st.session_state["analysis_result"] = None
+    if "analysis_requested" not in st.session_state:
+        st.session_state["analysis_requested"] = False
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -161,46 +182,22 @@ def render_sidebar() -> Optional[str]:
         st.session_state["view_mode"] = "decision"
         st.rerun()
 
-    # Settings & Key configuration placed at the TOP for immediate accessibility
+    # System Status
     st.sidebar.markdown("---")
-    st.sidebar.subheader("⚙️ Settings & API Key")
+    st.sidebar.subheader("⚙️ System Status")
 
-    env_key = os.getenv("OPENAI_API_KEY", "")
-    session_key = st.session_state.get("openai_api_key", "")
-    effective_key = (session_key or env_key).strip()
+    from services.ollama_service import check_ollama_health
 
-    user_key = st.sidebar.text_input(
-        "OpenAI API Key",
-        value=session_key or env_key,
-        type="password",
-        placeholder="sk-proj-...",
-        help="Enter your OpenAI API key to activate AI agent. Never logged.",
-    )
-    if user_key and user_key.strip() != session_key:
-        st.session_state["openai_api_key"] = user_key.strip()
-        os.environ["OPENAI_API_KEY"] = user_key.strip()
-        effective_key = user_key.strip()
-        st.session_state["demo_mode"] = False
-        st.rerun()
+    health = check_ollama_health()
+    cfg_model = health.get("configured_model", "llama3.2:1b")
+    if health.get("reachable") and health.get("model_available"):
+        st.sidebar.success(f"🤖 **AI Engine**: Active (Ollama - {cfg_model})")
+    elif health.get("reachable"):
+        st.sidebar.warning(f"⚠️ **AI Engine**: Connected (Loading '{cfg_model}'...)")
+    else:
+        st.sidebar.info("🇮🇳 **NSE Assistant**: Active (Built-in Intelligence)")
 
-    # Demo Mode toggle
-    demo_checked = st.sidebar.checkbox(
-        "🧪 Live Demo Mode (No API key)",
-        value=st.session_state.get("demo_mode", not bool(effective_key)),
-        help="Compare stocks and view real-time NSE data directly without an OpenAI API key.",
-    )
-    st.session_state["demo_mode"] = demo_checked
-
-    if not effective_key and not demo_checked:
-        st.sidebar.warning("⚠️ OpenAI API key missing. Enter key above or check Demo Mode.")
-    elif demo_checked and not effective_key:
-        st.sidebar.info("💡 **Live Demo Mode Active**: Real-time NSE data without API key.")
-    elif effective_key:
-        st.sidebar.success("✅ **AI Agent Active**: Full GPT reasoning enabled.")
-
-    llm_provider = os.getenv("LLM_PROVIDER", "openai").upper()
-    llm_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    st.sidebar.caption(f"Provider: **{llm_provider}** | Model: **{llm_model}**")
+    st.sidebar.caption(f"Model: **{cfg_model}** | Rate Limit: **30 req/min**")
     st.sidebar.caption("Exchange: **National Stock Exchange (NSE)**")
 
     st.sidebar.markdown("---")
@@ -719,12 +716,12 @@ def render_decision_assistant_dashboard() -> None:
     if not is_existing:
         in_col1, in_col2, in_col3, in_col4 = st.columns([0.45, 0.25, 0.15, 0.15])
         with in_col1:
-            stock_input = st.text_input(
+            stock_input = stock_autocomplete(
                 "Stock Name or Symbol",
-                value=st.session_state.get("decision_stock", "Tata Power"),
+                value=st.session_state.get("stock_search_text", st.session_state.get("decision_stock", "")),
                 key="decision_stock_input",
-                placeholder="e.g. Tata Power, TCS, India Cements, RELIANCE",
-                help="Type company name or NSE ticker symbol",
+                placeholder="e.g. Tata Motors, RELIANCE, TCS, HDFC Bank",
+                help="Type company name or NSE ticker symbol to view live suggestions",
             )
         with in_col2:
             horizon_input = st.selectbox(
@@ -737,24 +734,24 @@ def render_decision_assistant_dashboard() -> None:
         with in_col3:
             st.write("")
             st.write("")
-            run_btn = st.button("🚀 Analyze", use_container_width=True, type="primary")
+            analyze_clicked = st.button("🚀 Analyze", use_container_width=True, type="primary")
         with in_col4:
             st.write("")
             st.write("")
             refresh_btn = st.button("🔄 Refresh", use_container_width=True)
             if refresh_btn:
                 st.session_state["decision_cache_token"] = st.session_state.get("decision_cache_token", 0) + 1
-                st.rerun()
         purchase_price_val = None
         quantity_val = None
     else:
         in_col1, in_col2, in_col3, in_col4, in_col5 = st.columns([0.30, 0.20, 0.20, 0.15, 0.15])
         with in_col1:
-            stock_input = st.text_input(
+            stock_input = stock_autocomplete(
                 "Stock Name or Symbol",
-                value=st.session_state.get("decision_stock", "Tata Power"),
+                value=st.session_state.get("stock_search_text", st.session_state.get("decision_stock", "")),
                 key="decision_stock_input_ex",
                 placeholder="e.g. Tata Motors, HDFC Bank, PNC Infratech",
+                help="Type company name or NSE ticker symbol to view live suggestions",
             )
         with in_col2:
             horizon_input = st.selectbox(
@@ -784,48 +781,114 @@ def render_decision_assistant_dashboard() -> None:
         with in_col5:
             st.write("")
             st.write("")
-            run_btn = st.button("🚀 Analyze", use_container_width=True, type="primary")
+            analyze_clicked = st.button("🚀 Analyze", use_container_width=True, type="primary")
             refresh_btn = st.button("🔄 Refresh", use_container_width=True)
             if refresh_btn:
                 st.session_state["decision_cache_token"] = st.session_state.get("decision_cache_token", 0) + 1
-                st.rerun()
 
         purchase_price_val = float(purchase_price_raw) if purchase_price_raw > 0 else None
         quantity_val = int(quantity_raw) if quantity_raw > 0 else None
 
     # Update session state with current inputs
-    if stock_input:
-        st.session_state["decision_stock"] = stock_input.strip()
     st.session_state["decision_horizon"] = horizon_input
     if is_existing:
         st.session_state["decision_purchase_price"] = purchase_price_val or 0.0
         st.session_state["decision_quantity"] = quantity_val or 0
 
-    target_stock = st.session_state.get("decision_stock", "Tata Power").strip()
-    if not target_stock:
-        st.warning("Please enter a stock name or NSE symbol above.")
-        return
+    # If user clicked refresh on an existing analysis, re-run analysis
+    if refresh_btn and (st.session_state.get("selected_symbol") or st.session_state.get("analysis_result")):
+        analyze_clicked = True
 
-    cache_token = st.session_state.get("decision_cache_token", 0)
-
-    # Execute analysis with caching
-    with st.spinner(f"Analyzing {target_stock} across fundamentals, valuation, sector, technicals, news & risks..."):
-        try:
-            decision_res = _cached_analyze_stock_decision(
-                stock=target_stock,
-                intent=intent_arg,
-                horizon=horizon_input,
-                purchase_price=purchase_price_val,
-                quantity=quantity_val,
-                cache_token=cache_token,
-            )
-        except Exception as exc:
-            st.error(f"⚠️ Decision analysis encountered an issue: {exc}")
+    if analyze_clicked:
+        raw_query = (
+            st.session_state.get("selected_symbol")
+            or st.session_state.get("decision_selected_symbol")
+            or stock_input
+            or st.session_state.get("decision_stock")
+            or ""
+        ).strip()
+        if not raw_query:
+            st.warning("Please enter a stock name or NSE symbol above.")
             return
+
+        selected_sym = st.session_state.get("selected_symbol")
+
+        # Check for ambiguity if user typed a broad search without picking a suggestion
+        suggestions = st.session_state.get("stock_suggestions") or []
+        if not suggestions:
+            suggestions = search_stocks(raw_query, limit=15)
+
+        is_exact_symbol = raw_query.upper() in INDIAN_STOCK_MASTER
+        is_exact_company = any(raw_query.lower() == s.get("company_name", "").lower() for s in suggestions)
+
+        if not selected_sym and not is_exact_symbol and not is_exact_company and len(suggestions) > 1:
+            st.warning(f'Multiple stocks match "{raw_query}". Please select the stock you want to analyze.')
+            st.session_state["analysis_requested"] = False
+            return
+
+        if selected_sym and selected_sym in INDIAN_STOCK_MASTER:
+            target_symbol = selected_sym
+            company_display_name = (
+                st.session_state.get("selected_stock_name")
+                or st.session_state.get("decision_selected_stock")
+                or INDIAN_STOCK_MASTER[selected_sym]["company_name"]
+            )
+            st.session_state["selected_symbol"] = target_symbol
+            st.session_state["decision_selected_symbol"] = target_symbol
+            st.session_state["selected_stock_name"] = company_display_name
+            st.session_state["decision_selected_stock"] = company_display_name
+        elif is_exact_symbol:
+            target_symbol = raw_query.upper()
+            company_display_name = INDIAN_STOCK_MASTER[target_symbol]["company_name"]
+            st.session_state["selected_symbol"] = target_symbol
+            st.session_state["decision_selected_symbol"] = target_symbol
+            st.session_state["selected_stock_name"] = company_display_name
+            st.session_state["decision_selected_stock"] = company_display_name
+        else:
+            resolved = resolve_nse_symbol(raw_query, allow_online_lookup=False)
+            if resolved.get("is_ambiguous"):
+                st.warning(f'Multiple stocks match "{raw_query}". Please select the stock you want to analyze.')
+                st.session_state["analysis_requested"] = False
+                return
+            if not resolved.get("symbol"):
+                st.error(f"Could not resolve '{raw_query}' to an NSE ticker symbol. Please check the company name or symbol.")
+                st.session_state["analysis_requested"] = False
+                return
+            target_symbol = resolved["symbol"]
+            company_display_name = resolved.get("company_name", target_symbol)
+            st.session_state["selected_symbol"] = target_symbol
+            st.session_state["decision_selected_symbol"] = target_symbol
+            st.session_state["selected_stock_name"] = company_display_name
+            st.session_state["decision_selected_stock"] = company_display_name
+
+        st.session_state["analysis_requested"] = True
+        st.session_state["decision_stock"] = target_symbol
+        cache_token = st.session_state.get("decision_cache_token", 0)
+
+        with st.spinner(f"Analyzing {company_display_name} across fundamentals, valuation, sector, technicals, news & risks..."):
+            try:
+                decision_res = _cached_analyze_stock_decision(
+                    stock=target_symbol,
+                    intent=intent_arg,
+                    horizon=horizon_input,
+                    purchase_price=purchase_price_val,
+                    quantity=quantity_val,
+                    cache_token=cache_token,
+                )
+                st.session_state["analysis_result"] = decision_res
+            except Exception as exc:
+                st.error(f"⚠️ Decision analysis encountered an issue: {exc}")
+                st.session_state["analysis_result"] = None
+                return
+
+    decision_res = st.session_state.get("analysis_result")
+    if not decision_res:
+        st.info("👆 Enter a stock name or NSE symbol above and click **🚀 Analyze** to generate the complete investment decision report.")
+        return
 
     # Check for resolution failure
     if not decision_res.resolved_symbol:
-        st.error(f"⚠️ Could not resolve NSE symbol for '{target_stock}'. Please check the company name or symbol.")
+        st.error(f"⚠️ Could not resolve NSE symbol. Please check the company name or symbol.")
         return
 
     # Top Status Bar
@@ -962,7 +1025,8 @@ def render_decision_assistant_dashboard() -> None:
             pe_str = f"{decision_res.pe_ratio:.2f}" if decision_res.pe_ratio else "N/A"
             st.metric("Stock P/E", pe_str)
         with v_c2:
-            st.metric("Sector Average P/E", f"{decision_res.sector_pe:.2f}")
+            sec_pe_str = f"{decision_res.sector_pe:.2f}" if decision_res.sector_pe is not None else "N/A"
+            st.metric("Sector Average P/E", sec_pe_str)
         with v_c3:
             pb_str = f"{decision_res.pb_ratio:.2f}" if decision_res.pb_ratio else "N/A"
             st.metric("Price-to-Book (P/B)", pb_str)
@@ -1192,22 +1256,9 @@ def render_chat_messages(conversation_id: Optional[str]) -> None:
         with st.chat_message(role):
             st.markdown(content)
 
-    # If the last message was from the user with no assistant reply
-    # (e.g. from an unconfigured API key or interrupted run in a prior turn),
-    # inform the user directly in the assistant turn.
     if displayable and displayable[-1]["role"] == "user":
-        effective_key = (
-            st.session_state.get("openai_api_key", "") or os.getenv("OPENAI_API_KEY", "")
-        ).strip()
-        demo_mode = st.session_state.get("demo_mode", False)
         with st.chat_message("assistant"):
-            if not effective_key and not demo_mode:
-                st.warning(
-                    "⚠️ No response was generated because the OpenAI API key is missing. "
-                    "Please enter your OpenAI API key in the sidebar, or enable **🧪 Live Demo Mode** to compare stocks."
-                )
-            else:
-                st.info("ℹ️ No response recorded for the previous message. Please re-send your query below.")
+            st.info("ℹ️ No response recorded for the previous message. Please re-send your query below.")
 
 
 def process_user_input(prompt: str, current_id: Optional[str]) -> None:
@@ -1217,11 +1268,6 @@ def process_user_input(prompt: str, current_id: Optional[str]) -> None:
         prompt: User question or instruction.
         current_id: Existing conversation ID or None.
     """
-    effective_key = (
-        st.session_state.get("openai_api_key", "") or os.getenv("OPENAI_API_KEY", "")
-    ).strip()
-    demo_mode = st.session_state.get("demo_mode", False)
-
     # Create conversation in database if not yet existing
     if not current_id:
         try:
@@ -1241,17 +1287,12 @@ def process_user_input(prompt: str, current_id: Optional[str]) -> None:
     with st.chat_message("assistant"):
         with st.spinner("Analyzing NSE market data..."):
             try:
-                if effective_key or not demo_mode:
-                    result = run_agent(
-                        query=prompt,
-                        conversation_id=current_id,
-                        api_key=effective_key or None,
-                    )
-                else:
-                    result = run_demo_agent(
-                        query=prompt,
-                        conversation_id=current_id,
-                    )
+                from services.market_assistant_service import run_market_assistant
+
+                result = run_market_assistant(
+                    query=prompt,
+                    conversation_id=current_id,
+                )
 
                 assistant_response = result.get("response", "")
                 st.markdown(assistant_response)
@@ -1315,41 +1356,9 @@ def render_app() -> None:
 
     # Render top header bar with live status pill
     render_top_header(
-        title="NSE Market Intelligence",
-        subtitle="Agentic AI Stock Analysis & Real-time Indian Equity Research",
+        title="🇮🇳 NSE AI Market Assistant",
+        subtitle="Intelligent Real-time Indian Equity Research & Market Analysis",
     )
-
-    effective_key = (
-        st.session_state.get("openai_api_key", "") or os.getenv("OPENAI_API_KEY", "")
-    ).strip()
-    demo_mode = st.session_state.get("demo_mode", False)
-
-    if not effective_key and not demo_mode:
-        with st.container():
-            st.warning(
-                "🔑 **OpenAI API Key Missing**: Enter your API key below or enable **🧪 Live Demo Mode** in the sidebar to compare stocks without an API key."
-            )
-            col_k1, col_k2 = st.columns([0.8, 0.2])
-            with col_k1:
-                entered_k = st.text_input(
-                    "OpenAI API Key",
-                    type="password",
-                    placeholder="sk-proj-...",
-                    key="main_banner_key",
-                    label_visibility="collapsed",
-                )
-            with col_k2:
-                if st.button("Activate AI Key", type="primary", use_container_width=True):
-                    if entered_k.strip():
-                        st.session_state["openai_api_key"] = entered_k.strip()
-                        os.environ["OPENAI_API_KEY"] = entered_k.strip()
-                        st.session_state["demo_mode"] = False
-                        st.rerun()
-    elif demo_mode and not effective_key:
-        st.info(
-            "💡 **Live Demo Mode Active**: Real-time NSE stock prices, fundamentals, and sentiment analysis are active without requiring an API key. "
-            "Enter an OpenAI API key in the sidebar anytime to switch to full conversational GPT reasoning."
-        )
 
     # Active conversation header
     if active_cid:
@@ -1363,7 +1372,7 @@ def render_app() -> None:
     render_chat_messages(active_cid)
 
     # Chat input box at page bottom
-    user_prompt = st.chat_input("Ask about any NSE stock, index, news, or comparison...")
+    user_prompt = st.chat_input("Ask about any NSE stock, market, index, news or comparison...")
     if user_prompt:
         process_user_input(user_prompt.strip(), active_cid)
 

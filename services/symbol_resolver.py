@@ -688,35 +688,61 @@ def search_stocks(query: str, limit: int = 10) -> list[dict[str, Any]]:
             "_score": score,
         })
 
-    # 1. Exact symbol match
+    # 0. Check for parenthesized symbol or exact display match e.g. "Tata Power Company Limited (TATAPOWER)"
+    paren_match = re.search(r"\(([A-Z0-9_\-\.\&]+)\)\s*$", query.strip(), re.IGNORECASE)
+    if paren_match:
+        extracted_sym = paren_match.group(1).upper()
+        if extracted_sym in INDIAN_STOCK_MASTER:
+            _add_result(extracted_sym, score=100)
+    for sym, data in INDIAN_STOCK_MASTER.items():
+        disp = f"{data.get('company_name', sym)} ({sym})"
+        if disp.strip().lower() == query.strip().lower():
+            _add_result(sym, score=100)
+
+    # 1. Exact match (symbol or company name)
     if q_upper in INDIAN_STOCK_MASTER:
         _add_result(q_upper, score=100)
+    for sym, data in INDIAN_STOCK_MASTER.items():
+        if _clean_text(data.get("company_name", "")) == clean_q:
+            _add_result(sym, score=100)
 
-    # 2. Symbol prefix match
-    for sym in INDIAN_STOCK_MASTER.keys():
-        if sym.startswith(q_upper):
-            _add_result(sym, score=90)
-
-    # 3. Official name or alias match
+    # 2. Priority 1: Company name starts with entered text
     for sym, data in INDIAN_STOCK_MASTER.items():
         name_clean = _clean_text(data.get("company_name", ""))
         if name_clean.startswith(clean_q):
-            _add_result(sym, score=80)
-        elif clean_q in name_clean:
-            _add_result(sym, score=70)
-        else:
-            for al in data.get("aliases", []):
-                al_clean = _clean_text(al)
-                if al_clean.startswith(clean_q):
-                    _add_result(sym, score=60)
-                    break
-                elif clean_q in al_clean:
-                    _add_result(sym, score=50)
-                    break
+            _add_result(sym, score=90)
 
-    # Sort results by score descending
-    results.sort(key=lambda x: x["_score"], reverse=True)
+    # 3. Priority 2: Symbol starts with entered text
+    for sym in INDIAN_STOCK_MASTER.keys():
+        if sym.startswith(q_upper):
+            _add_result(sym, score=80)
+
+    # 4. Priority 3: Company name contains entered text
+    for sym, data in INDIAN_STOCK_MASTER.items():
+        name_clean = _clean_text(data.get("company_name", ""))
+        if clean_q in name_clean:
+            _add_result(sym, score=70)
+
+    # 5. Priority 4: Alias starts with or contains entered text
+    for sym, data in INDIAN_STOCK_MASTER.items():
+        for al in data.get("aliases", []):
+            al_clean = _clean_text(al)
+            if al_clean.startswith(clean_q):
+                _add_result(sym, score=60)
+                break
+            elif clean_q in al_clean:
+                _add_result(sym, score=50)
+                break
+
+    # 6. Priority 5: Symbol contains entered text
+    for sym in INDIAN_STOCK_MASTER.keys():
+        if clean_q in sym.lower():
+            _add_result(sym, score=40)
+
+    # Sort results by score descending, then shorter company name, then alphabetically
+    results.sort(key=lambda x: (-x["_score"], len(x["company_name"]), x["company_name"]))
     for r in results:
         r.pop("_score", None)
+        r["display_text"] = r["display"]
 
     return results[:limit]

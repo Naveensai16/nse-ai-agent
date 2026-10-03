@@ -241,7 +241,8 @@ STOP_WORDS = {
     "BOUGHT", "PURCHASED", "SHOULD", "WOULD", "COULD", "GOOD", "TIME",
     "DOWN", "UP", "AT", "IT", "IN", "AN", "A", "OR", "IF", "MY", "I",
     "NOW", "ANOTHER", "YEAR", "YEARS", "MONTH", "MONTHS", "CORRECTION",
-    "INVESTMENT", "DECISION", "CONTINUE", "PORTFOLIO",
+    "INVESTMENT", "DECISION", "CONTINUE", "PORTFOLIO", "STACK", "UP", "AGAINST",
+    "SIDE", "BY", "PUT", "COMPARED", "TO", "TELL", "CHECK", "DOING",
 }
 
 
@@ -266,22 +267,29 @@ def extract_symbols_from_query(query: str) -> list[str]:
         return []
 
     # 1. Multi-word phrase scan first (longest multi-word aliases first, e.g. 'TATA MOTORS', 'STATE BANK OF INDIA', 'YES BANK')
+    matched_spans: list[tuple[int, int]] = []
     for alias, ticker in sorted(STOCK_ALIASES.items(), key=lambda x: len(x[0]), reverse=True):
         if len(alias.split()) < 2:
             continue
         pattern = r"\b" + re.escape(alias) + r"\b"
-        if re.search(pattern, q_upper):
+        for m in re.finditer(pattern, q_upper):
+            if any(max(m.start(), s[0]) < min(m.end(), s[1]) for s in matched_spans):
+                continue
+            matched_spans.append((m.start(), m.end()))
             if ticker not in found:
                 found.append(ticker)
 
     for g_alias in sorted(GLOBAL_STOCKS.keys(), key=len, reverse=True):
         pattern = r"\b" + re.escape(g_alias) + r"\b"
-        if re.search(pattern, q_upper):
+        for m in re.finditer(pattern, q_upper):
+            if any(max(m.start(), s[0]) < min(m.end(), s[1]) for s in matched_spans):
+                continue
+            matched_spans.append((m.start(), m.end()))
             if g_alias not in found:
                 found.append(g_alias)
 
     # 2. Segment-based parser (handles comma-separated lists, 'and'/'vs' joined, or carrier phrases)
-    segments = re.split(r'[,;\n/]|(?:\s+(?:and|vs|versus|with)\s+)', query, flags=re.IGNORECASE)
+    segments = re.split(r'[,;\n/]|(?:\s+(?:and|vs|versus|with|against|compared to|side by side with)\s+)', query, flags=re.IGNORECASE)
     all_known_keys = [
         k for k in (list(STOCK_ALIASES.keys()) + list(GLOBAL_STOCKS.keys()))
         if k.lower() not in GENERIC_FINANCIAL_WORDS and k.lower() not in CONGLOMERATE_GROUPS
@@ -592,8 +600,6 @@ def run_demo_comparison(symbols: list[str]) -> tuple[str, list[dict[str, Any]]]:
     if exchange_notes:
         lines.append("\n> [!NOTE]\n> **Exchange & Currency Context:**\n> " + "\n> ".join(f"- {n}" for n in exchange_notes))
 
-    lines.append("\n> [!TIP]\n> *To unlock conversational open-ended reasoning, comparative sector synthesis, and interactive follow-ups, enter your OpenAI API key in the sidebar.*")
-
     return "\n".join(lines), tool_calls
 
 
@@ -736,7 +742,7 @@ def run_demo_single_stock(
     if news_res:
         lines.extend(format_news_section(news_res, company_name=comp, symbol=sym))
 
-    lines.append("\n> [!NOTE]\n> *Generated via Demo Analysis Mode with live NSE data.*")
+    lines.append("\n> [!NOTE]\n> *Generated with live NSE market data.*")
     return "\n".join(lines), tool_calls
 
 
@@ -745,274 +751,18 @@ def run_demo_agent(
     conversation_id: Optional[str] = None,
     db_path: Optional[Union[str, Path]] = None,
 ) -> dict[str, Any]:
-    """Execute live market analysis in demo / offline mode without requiring an LLM API key.
+    """Execute live market analysis without requiring an LLM API key.
 
-    Extracts symbols and intents from the prompt, invokes the corresponding live market tools,
-    generates a comprehensive structured response, and persists the interaction to SQLite.
-    Supports arbitrary N companies, news summaries with external links, and typo tolerance.
+    Delegates to the modular run_market_assistant pipeline, supporting natural-language
+    intent understanding, catalyst discovery, 52-week high scans, stock comparisons,
+    and multi-turn conversation context.
     """
-    initialize_database(db_path)
+    from services.market_assistant_service import run_market_assistant
 
-    if conversation_id:
-        conv = get_conversation(conversation_id, db_path=db_path)
-        if not conv:
-            conv = create_conversation(title=query[:60], conversation_id=conversation_id, db_path=db_path)
-    else:
-        conv = create_conversation(title=query[:60], db_path=db_path)
-        conversation_id = conv["conversation_id"]
+    return run_market_assistant(
+        query=query,
+        conversation_id=conversation_id,
+        db_path=db_path,
+    )
 
-    # 1. Persist user message
-    add_message(conversation_id, role="user", content=query, db_path=db_path)
-
-    q_lower = query.lower()
-    symbols = extract_symbols_from_query(query)
-    tool_calls: list[dict[str, Any]] = []
-
-    if "gainer" in q_lower:
-        tool_calls.append({"name": "get_top_gainers", "args": {}})
-        gainers = get_top_gainers()
-        lines = ["### 🚀 Top Market Gainers (NSE)\n", "| Symbol | Company | Price | Change (%) |", "| :--- | :--- | :--- | :--- |"]
-        for g in gainers[:10]:
-            lines.append(f"| **{g.get('symbol')}** | {g.get('company', '')} | {format_currency(g.get('current_price'))} | 🟢 +{g.get('change_percent', 0.0):.2f}% |")
-        response_text = "\n".join(lines)
-
-    elif "loser" in q_lower:
-        tool_calls.append({"name": "get_top_losers", "args": {}})
-        losers = get_top_losers()
-        lines = ["### 📉 Top Market Losers (NSE)\n", "| Symbol | Company | Price | Change (%) |", "| :--- | :--- | :--- | :--- |"]
-        for l in losers[:10]:
-            lines.append(f"| **{l.get('symbol')}** | {l.get('company', '')} | {format_currency(l.get('current_price'))} | 🔴 {l.get('change_percent', 0.0):.2f}% |")
-        response_text = "\n".join(lines)
-
-    elif "news" in q_lower and not symbols:
-        tool_calls.append({"name": "get_market_news", "args": {"company_or_symbol": "NIFTY 50", "limit": 5}})
-        try:
-            news_res = get_market_news("NIFTY 50", limit=5)
-        except Exception:
-            news_res = []
-        lines = [
-            "### 📰 Latest Indian Stock Market News & Executive Summaries\n",
-        ]
-        lines.extend(format_news_section(news_res, company_name="Indian Stock Market", symbol="NIFTY", include_header=False))
-        response_text = "\n".join(lines)
-
-    elif any(
-        kw in q_lower
-        for kw in (
-            "2-day",
-            "trading opportunit",
-            "short-term opportunit",
-            "short term opportunit",
-            "stocks to watch",
-            "trading setup",
-            "short-term setup",
-            "short term setup",
-        )
-    ) and not symbols:
-        tool_calls.append({"name": "get_short_term_opportunities", "args": {"limit": 5, "universe": "NIFTY 200"}})
-        try:
-            opp_res = get_short_term_opportunities(limit=5, universe="NIFTY 200")
-            response_text = opp_res.get("report_markdown", "No setups identified.")
-        except Exception as exc:
-            response_text = f"⚠️ Could not scan short-term opportunities: {exc}"
-
-    elif any(
-        kw in q_lower
-        for kw in (
-            "top sector",
-            "top sectors",
-            "best performing sector",
-            "best sector",
-            "sector performance",
-            "sectors today",
-            "top 5 sector",
-            "top 5 sectors",
-            "leading sector",
-            "sector ranking",
-        )
-    ) and not symbols:
-        tool_calls.append({"name": "get_top_sectors_and_companies", "args": {}})
-        try:
-            sec_res = get_top_sectors_and_companies()
-            response_text = sec_res.get("report_markdown", "No sector data available.")
-        except Exception as exc:
-            response_text = f"⚠️ Could not retrieve top sectors data: {exc}"
-
-    elif any(
-        kw in q_lower
-        for kw in (
-            "should i buy",
-            "should i sell",
-            "should i hold",
-            "should i exit",
-            "should i reduce",
-            "should i average",
-            "should i keep",
-            "good time to buy",
-            "good to buy",
-            "hold or sell",
-            "buy or sell",
-            "can i hold",
-            "can i buy",
-            "bought",
-            "i own",
-            "already own",
-            "exit",
-            "average or sell",
-            "good for a",
-            "good investment",
-            "wait for a correction",
-            "wait before buying",
-            "decision",
-        )
-    ):
-        intent, stock, horizon, purchase_price, quantity = detect_user_intent_and_details(query)
-        target_symbol = stock or (symbols[0] if symbols else None)
-        if target_symbol:
-            tool_calls.append({
-                "name": "get_stock_decision",
-                "args": {
-                    "symbol": target_symbol,
-                    "intent": intent,
-                    "horizon": horizon,
-                    "purchase_price": purchase_price,
-                    "quantity": quantity,
-                },
-            })
-            try:
-                dec_res = get_stock_decision(
-                    symbol_or_name=target_symbol,
-                    intent=intent,
-                    horizon=horizon,
-                    purchase_price=purchase_price,
-                    quantity=quantity,
-                )
-                response_text = dec_res.get("report_markdown", "No decision analysis available.")
-            except Exception as exc:
-                response_text = f"⚠️ Could not complete stock decision analysis: {exc}"
-        else:
-            response_text = "Please specify an NSE stock symbol or company name for decision analysis."
-
-    elif len(symbols) >= 2 or ("compare" in q_lower and len(symbols) >= 1):
-        if len(symbols) == 1:
-            default_partner = "HDFCBANK" if symbols[0] != "HDFCBANK" else "SBIN"
-            symbols.append(default_partner)
-        response_text, tool_calls = run_demo_comparison(symbols)
-
-    elif len(symbols) == 1:
-        is_news = any(kw in q_lower for kw in ("news", "why", "fall", "drop", "rise", "update"))
-        is_comprehensive = any(
-            kw in q_lower
-            for kw in (
-                "tell me about",
-                "about",
-                "deep dive",
-                "analysis",
-                "report",
-                "fundamental",
-                "financial",
-                "detailed",
-                "overview",
-                "valuation",
-                "roce",
-                "roe",
-                "health",
-                "promoter",
-                "shareholding",
-            )
-        )
-        if is_comprehensive and not is_news:
-            response_text, tool_calls = run_demo_single_stock(symbols[0], is_news_query=False, comprehensive=True)
-        else:
-            response_text, tool_calls = run_demo_single_stock(symbols[0], is_news_query=is_news)
-
-    else:
-        # Check if the query is an ambiguous conglomerate group (e.g. 'Tata', 'Adani', 'Birla')
-        clean_q = _clean_text(query)
-        words_non_stop = [w for w in clean_q.split() if w.upper() not in STOP_WORDS]
-        ambig_res = None
-        for w in words_non_stop:
-            ambig_res = check_conglomerate_ambiguity(w, w)
-            if ambig_res and ambig_res.get("is_ambiguous"):
-                break
-        if not ambig_res:
-            ambig_res = check_conglomerate_ambiguity(query, clean_q)
-
-        if ambig_res and ambig_res.get("is_ambiguous"):
-            cand_lines = [
-                f"- **{c['name']}** (`{c['symbol']}`) — *{c.get('sector', '')}*"
-                for c in ambig_res.get("candidates", [])
-            ]
-            cands_md = "\n".join(cand_lines)
-            response_text = (
-                f"### ⚠️ Ambiguous Company / Group Name\n\n"
-                f"{ambig_res.get('error', '')}\n\n"
-                f"**Listed Entities:**\n{cands_md}\n\n"
-                "Please specify which company you would like to analyze."
-            )
-            add_message(conversation_id, role="assistant", content=response_text, db_path=db_path)
-            return {
-                "status": "success",
-                "conversation_id": conversation_id,
-                "query": query,
-                "response": response_text,
-                "tool_calls": [],
-            }
-
-        # Check if user entered solely a generic financial term like "Bank", "Power", "Cement"
-        clean_q = _clean_text(query)
-        words_q = clean_q.split()
-        non_stop = [w for w in words_q if w.upper() not in STOP_WORDS]
-        if non_stop and all(w in GENERIC_FINANCIAL_WORDS for w in non_stop):
-            term_str = query.strip()
-            response_text = (
-                f"### ⚠️ Generic Term Detected\n\n"
-                f"**\"{term_str}\"** is a generic industry or financial term rather than an individual listed company.\n\n"
-                "Please provide a specific company name or ticker symbol. For example:\n"
-                "- **YES Bank** (`YESBANK`)\n"
-                "- **State Bank of India** (`SBIN`)\n"
-                "- **HDFC Bank** (`HDFCBANK`)\n"
-                "- **Tata Power** (`TATAPOWER`)\n"
-            )
-            add_message(conversation_id, role="assistant", content=response_text, db_path=db_path)
-            return {
-                "status": "success",
-                "conversation_id": conversation_id,
-                "query": query,
-                "response": response_text,
-                "tool_calls": [],
-            }
-
-        # General guidance
-        tool_calls.append({"name": "get_market_index", "args": {"index_name": "NIFTY"}})
-        try:
-            nifty = get_market_index("NIFTY")
-            nifty_str = f"NIFTY 50 is at {nifty.get('current_value')} ({nifty.get('change_percent'):+.2f}%)."
-        except Exception:
-            nifty_str = ""
-
-
-        response_text = (
-            "### 🇮🇳 NSE Market Assistant (Demo Mode)\n\n"
-            f"{nifty_str}\n\n"
-            "I can analyze and compare Indian and global equities using real-time market data.\n\n"
-            "**Try asking:**\n"
-            "* *\"Compare TCS, Infosys, Wipro, Capgemini, IBM\"*\n"
-            "* *\"Compare SBI Bank and HDFC Bank stocks\"*\n"
-            "* *\"What are the top gainers today?\"*\n"
-            "* *\"What is the stock price of Reliance?\"*\n\n"
-            "> [!TIP]\n"
-            "> *To enable conversational natural language reasoning powered by GPT, enter your OpenAI API key in the sidebar.*"
-        )
-
-    # Persist assistant response
-    add_message(conversation_id, role="assistant", content=response_text, db_path=db_path)
-
-    return {
-        "status": "success",
-        "conversation_id": conversation_id,
-        "query": query,
-        "response": response_text,
-        "tool_calls": tool_calls,
-    }
 

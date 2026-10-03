@@ -111,10 +111,10 @@ def format_error_message(error: Exception) -> str:
     err_str = str(error).strip()
     err_type = type(error).__name__
 
-    if "LLMConfigurationError" in err_type or "OPENAI_API_KEY" in err_str:
+    if "LLMConfigurationError" in err_type:
         return (
-            "Configuration Error: OpenAI API key is missing or invalid. "
-            "Please configure `OPENAI_API_KEY` in your `.env` file to enable AI analysis."
+            "Configuration Notice: The AI engine is initializing or unavailable. "
+            "The assistant is operating using built-in NSE market intelligence."
         )
 
     if isinstance(error, (ConnectionError, TimeoutError)) or "timeout" in err_str.lower():

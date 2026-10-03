@@ -1,0 +1,71 @@
+version: "3.8"
+
+services:
+  # Private Ollama LLM Service (Port 11434 not publicly exposed)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: nse_ai_ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_models:/root/.ollama
+    networks:
+      - nse_internal_net
+    # Kept strictly internal; NOT bound to host 0.0.0.0
+    expose:
+      - "11434"
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # One-time model initialization helper (downloads model once into volume)
+  ollama-init:
+    image: curlimages/curl:latest
+    container_name: nse_ai_ollama_init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - nse_internal_net
+    restart: "no"
+    command: >
+      sh -c "echo 'Checking if model is loaded...' &&
+             curl -s http://ollama:11434/api/tags | grep -q 'llama3.2:1b' ||
+             (echo 'Downloading llama3.2:1b into persistent volume...' &&
+              curl -s -X POST http://ollama:11434/api/pull -d '{\"name\": \"llama3.2:1b\"}') &&
+             echo 'Model initialized and ready.'"
+
+  # NSE AI Streamlit Application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nse_ai_app
+    restart: unless-stopped
+    depends_on:
+      - ollama
+    ports:
+      - "8501:8501"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_MODEL=llama3.2:1b
+      - OLLAMA_TIMEOUT_SECONDS=18.0
+      - OLLAMA_MAX_PROMPT_LENGTH=1500
+      - OLLAMA_MAX_CONCURRENCY=4
+      - APP_ENV=production
+    volumes:
+      - app_data:/app/data
+    networks:
+      - nse_internal_net
+
+networks:
+  nse_internal_net:
+    name: nse_internal_net
+    driver: bridge
+
+volumes:
+  ollama_models:
+    name: nse_ai_ollama_models
+  app_data:
+    name: nse_ai_app_data

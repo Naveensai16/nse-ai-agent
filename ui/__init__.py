@@ -8,6 +8,7 @@ from ui.components import (
     render_metric_card,
     render_positive_negative_cards,
     render_stock_header,
+    stock_autocomplete,
 )
 from ui.header import render_top_header
 from ui.sidebar import render_sidebar
@@ -24,4 +25,5 @@ __all__ = [
     "render_stock_header",
     "render_top_header",
     "render_welcome_screen",
+    "stock_autocomplete",
 ]

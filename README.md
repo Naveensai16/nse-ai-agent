@@ -1,3 +1,13 @@
+---
+title: NSE AI Agent
+emoji: 📈
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # NSE Agentic AI Stock Analysis Application
 
 A production-ready, agentic AI stock analysis application designed for research, technical evaluation, fundamental analysis, and news tracking of equities listed on the **National Stock Exchange of India (NSE)**.

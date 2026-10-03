@@ -242,6 +242,14 @@ class DecisionResult:
 
     # Property aliases for flexible consumption across UI and tools
     @property
+    def primary_action(self) -> str:
+        return self.decision_indicator
+
+    @property
+    def confidence_score(self) -> float:
+        return self.composite_score
+
+    @property
     def resolved_symbol(self) -> str:
         return self.symbol
 

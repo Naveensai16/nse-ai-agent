@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import datetime
 import pytz
 import streamlit as st
-from ui.theme import COLOR_TEXT_MUTED, COLOR_TEXT_PRIMARY
 
 
 def get_current_ist_time_str() -> str:
@@ -22,27 +21,29 @@ def render_top_header(
     subtitle: str = "Indian Equity Market Research & Agentic Intelligence",
     show_live_pill: bool = True,
 ) -> None:
-    """Render a modern top application header with live market status pill."""
+    """Render a modern top application header with live market status pill.
+
+    Constructs clean, single-line unindented HTML to prevent Markdown parser
+    from incorrectly interpreting 4+ spaces of indentation as code blocks.
+    """
     ist_time = get_current_ist_time_str()
 
     live_pill_html = ""
     if show_live_pill:
-        live_pill_html = f"""
-        <div class="market-status-pill">
-            <span class="market-status-dot"></span>
-            <span>Market Data Live &bull; NSE &bull; {ist_time}</span>
-        </div>
-        """
+        live_pill_html = (
+            '<div class="market-status-pill">'
+            '<span class="market-status-dot"></span>'
+            f"<span>Market Data Live &bull; NSE &bull; {ist_time}</span>"
+            "</div>"
+        )
 
-    header_html = f"""
-    <div class="top-app-header">
-        <div class="top-header-left">
-            <div class="top-header-title">{title}</div>
-            <div class="top-header-sub">{subtitle}</div>
-        </div>
-        <div class="top-header-right">
-            {live_pill_html}
-        </div>
-    </div>
-    """
+    header_html = (
+        '<div class="top-app-header">'
+        '<div class="top-header-left">'
+        f'<div class="top-header-title">{title}</div>'
+        f'<div class="top-header-sub">{subtitle}</div>'
+        "</div>"
+        f'<div class="top-header-right">{live_pill_html}</div>'
+        "</div>"
+    )
     st.markdown(header_html, unsafe_allow_html=True)

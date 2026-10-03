@@ -48,11 +48,12 @@ class LLMConfigurationError(ValueError):
     pass
 
 
-DEFAULT_PROVIDER = "openai"
-DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+DEFAULT_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").lower()
+DEFAULT_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
+DEFAULT_OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_MAX_RETRIES = 2
-SUPPORTED_PROVIDERS = ("openai",)
+SUPPORTED_PROVIDERS = ("ollama", "openai")
 
 
 # ==============================================================================
@@ -587,13 +588,26 @@ def get_llm(
             f"Supported providers: {', '.join(SUPPORTED_PROVIDERS)}"
         )
 
+    if selected_provider == "ollama":
+        ollama_base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+        selected_model = (model or os.getenv("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)).strip()
+        return ChatOpenAI(
+            base_url=f"{ollama_base}/v1",
+            api_key="ollama",
+            model=selected_model,
+            temperature=temperature,
+            timeout=request_timeout,
+            max_retries=max_retries,
+            **kwargs,
+        )
+
     selected_model = (model or os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)).strip()
     resolved_api_key = (api_key or os.getenv("OPENAI_API_KEY", "")).strip()
 
     if not resolved_api_key:
         raise LLMConfigurationError(
             "OpenAI API key is missing. Please set the OPENAI_API_KEY environment variable "
-            "in your .env file or system environment."
+            "in your .env file or system environment, or switch LLM_PROVIDER to 'ollama'."
         )
 
     return ChatOpenAI(

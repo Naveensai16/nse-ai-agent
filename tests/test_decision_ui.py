@@ -212,9 +212,9 @@ class TestDecisionDashboard:
 
     def test_decision_dashboard_renders_new_investment(self):
         mock_res = _create_mock_decision_result(intent="new")
-        with patch.object(app, "st") as mock_st, patch(
-            "app._cached_analyze_stock_decision", return_value=mock_res
-        ):
+        with patch.object(app, "st") as mock_st, \
+             patch("app._cached_analyze_stock_decision", return_value=mock_res), \
+             patch("app.stock_autocomplete", return_value="TATAPOWER"):
             mock_st.session_state = {
                 "decision_stock": "Tata Power",
                 "decision_intent": "Thinking of Buying",
@@ -226,7 +226,7 @@ class TestDecisionDashboard:
             }
             mock_st.columns.side_effect = lambda spec, **kwargs: [MagicMock() for _ in range(spec if isinstance(spec, int) else len(spec))]
             mock_st.tabs.return_value = [MagicMock() for _ in range(6)]
-            mock_st.button.return_value = False
+            mock_st.button.side_effect = lambda label, **kwargs: True if "Analyze" in label else False
             mock_st.radio.return_value = "🛒 Thinking of Buying (New Investment)"
             mock_st.text_input.return_value = "Tata Power"
             mock_st.selectbox.return_value = "1 Year"
@@ -239,9 +239,9 @@ class TestDecisionDashboard:
 
     def test_decision_dashboard_renders_existing_investment_with_price(self):
         mock_res = _create_mock_decision_result(intent="existing", purchase_price=350.0)
-        with patch.object(app, "st") as mock_st, patch(
-            "app._cached_analyze_stock_decision", return_value=mock_res
-        ):
+        with patch.object(app, "st") as mock_st, \
+             patch("app._cached_analyze_stock_decision", return_value=mock_res), \
+             patch("app.stock_autocomplete", return_value="TATAPOWER"):
             mock_st.session_state = {
                 "decision_stock": "Tata Power",
                 "decision_intent": "Already Own",
@@ -253,7 +253,7 @@ class TestDecisionDashboard:
             }
             mock_st.columns.side_effect = lambda spec, **kwargs: [MagicMock() for _ in range(spec if isinstance(spec, int) else len(spec))]
             mock_st.tabs.return_value = [MagicMock() for _ in range(6)]
-            mock_st.button.return_value = False
+            mock_st.button.side_effect = lambda label, **kwargs: True if "Analyze" in label else False
             mock_st.radio.return_value = "💼 Already Own This Stock (Existing Investment)"
             mock_st.text_input.return_value = "Tata Power"
             mock_st.selectbox.return_value = "1 Year"

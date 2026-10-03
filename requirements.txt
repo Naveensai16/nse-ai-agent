@@ -1,10 +1,10 @@
-# Core Dependencies for Streamlit Cloud Deployment
+# Core Dependencies for NSE AI Agent
 streamlit>=1.35.0
 yfinance>=0.2.38
 pandas>=2.0.0
+openpyxl>=3.1.0
 python-dotenv>=1.0.1
 langchain-core>=0.3.0
-langchain-openai>=0.2.0
 langgraph>=0.2.0
 pytz>=2024.1
 requests>=2.31.0

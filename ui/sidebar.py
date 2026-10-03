@@ -44,45 +44,22 @@ def render_sidebar() -> Optional[str]:
         st.session_state["view_mode"] = "decision"
         st.rerun()
 
-    # 2. Configuration & API Key Expander / Drawer
+    # 2. System Status & Engine
     st.sidebar.markdown("---")
-    st.sidebar.subheader("⚙️ Settings & API Key")
+    st.sidebar.subheader("⚙️ System Status")
 
-    env_key = os.getenv("OPENAI_API_KEY", "")
-    session_key = st.session_state.get("openai_api_key", "")
-    effective_key = (session_key or env_key).strip()
+    from services.ollama_service import check_ollama_health
 
-    user_key = st.sidebar.text_input(
-        "OpenAI API Key",
-        value=session_key or env_key,
-        type="password",
-        placeholder="sk-proj-...",
-        help="Enter your OpenAI API key to activate AI agent. Never logged.",
-    )
-    if user_key and user_key.strip() != session_key:
-        st.session_state["openai_api_key"] = user_key.strip()
-        os.environ["OPENAI_API_KEY"] = user_key.strip()
-        effective_key = user_key.strip()
-        st.session_state["demo_mode"] = False
-        st.rerun()
+    health = check_ollama_health()
+    cfg_model = health.get("configured_model", "llama3.2:1b")
+    if health.get("reachable") and health.get("model_available"):
+        st.sidebar.success(f"🤖 **AI Engine**: Active (Ollama - {cfg_model})")
+    elif health.get("reachable"):
+        st.sidebar.warning(f"⚠️ **AI Engine**: Connected (Loading '{cfg_model}'...)")
+    else:
+        st.sidebar.info("🇮🇳 **NSE Assistant**: Active (Built-in Intelligence)")
 
-    demo_checked = st.sidebar.checkbox(
-        "🧪 Live Demo Mode (No API key)",
-        value=st.session_state.get("demo_mode", not bool(effective_key)),
-        help="Compare stocks and view real-time NSE data directly without an OpenAI API key.",
-    )
-    st.session_state["demo_mode"] = demo_checked
-
-    if not effective_key and not demo_checked:
-        st.sidebar.warning("⚠️ OpenAI API key missing. Enter key above or check Demo Mode.")
-    elif demo_checked and not effective_key:
-        st.sidebar.info("💡 **Live Demo Mode Active**: Real-time NSE data without API key.")
-    elif effective_key:
-        st.sidebar.success("✅ **AI Agent Active**: Full GPT reasoning enabled.")
-
-    llm_provider = os.getenv("LLM_PROVIDER", "openai").upper()
-    llm_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    st.sidebar.caption(f"Provider: **{llm_provider}** | Model: **{llm_model}**")
+    st.sidebar.caption(f"Model: **{cfg_model}** | Rate Limit: **30 req/min**")
     st.sidebar.caption("Exchange: **National Stock Exchange (NSE)**")
 
     # 3. Recent Chat History
